@@ -3,6 +3,10 @@ glog
 
 Leveled execution logs for Go.
 
+freakingawesome/glog
+====================
+This fork uses UTC times in both the log output and file names.
+
 This is an efficient pure Go implementation of leveled logs in the
 manner of the open source C++ package
 	https://github.com/google/glog

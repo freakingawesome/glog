@@ -513,7 +513,10 @@ func (l *loggingT) putBuffer(b *buffer) {
 	l.freeListMu.Unlock()
 }
 
-var timeNow = time.Now // Stubbed out for testing.
+// Stubbed out for testing.
+var timeNowUTC = func() time.Time {
+	return time.Now().UTC()
+}
 
 /*
 header formats a log header as defined by the C++ implementation.
@@ -521,12 +524,12 @@ It returns a buffer containing the formatted header and the user's file and line
 The depth specifies how many stack frames above lives the source line to be identified in the log message.
 
 Log lines have this form:
-	Lmmdd hh:mm:ss.uuuuuu threadid file:line] msg...
+	Lmmdd hh:mm:ss.uuuuuuZ threadid file:line] msg...
 where the fields are defined as follows:
 	L                A single character, representing the log level (eg 'I' for INFO)
 	mm               The month (zero padded; ie May is '05')
 	dd               The day (zero padded)
-	hh:mm:ss.uuuuuu  Time in hours, minutes and fractional seconds
+	hh:mm:ss.uuuuuuZ UTC Time in hours, minutes and fractional seconds
 	threadid         The space-padded thread ID as returned by GetTID()
 	file             The file name
 	line             The line number
@@ -548,7 +551,7 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 
 // formatHeader formats a log header using the provided file name and line number.
 func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
-	now := timeNow()
+	nowUTC := timeNowUTC()
 	if line < 0 {
 		line = 0 // not a real line number, but acceptable to someDigits
 	}
@@ -559,9 +562,9 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 
 	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
 	// It's worth about 3X. Fprintf is hard.
-	_, month, day := now.Date()
-	hour, minute, second := now.Clock()
-	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
+	_, month, day := nowUTC.Date()
+	hour, minute, second := nowUTC.Clock()
+	// Lmmdd hh:mm:ss.uuuuuuZ threadid file:line]
 	buf.tmp[0] = severityChar[s]
 	buf.twoDigits(1, int(month))
 	buf.twoDigits(3, day)
@@ -572,11 +575,12 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	buf.tmp[11] = ':'
 	buf.twoDigits(12, second)
 	buf.tmp[14] = '.'
-	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
-	buf.tmp[21] = ' '
-	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
-	buf.tmp[29] = ' '
-	buf.Write(buf.tmp[:30])
+	buf.nDigits(6, 15, nowUTC.Nanosecond()/1000, '0')
+	buf.tmp[21] = 'Z'
+	buf.tmp[22] = ' '
+	buf.nDigits(7, 23, pid, ' ') // TODO: should be TID
+	buf.tmp[30] = ' '
+	buf.Write(buf.tmp[:31])
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
@@ -813,7 +817,7 @@ func (sb *syncBuffer) Sync() error {
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 	if sb.nbytes+uint64(len(p)) >= MaxSize {
-		if err := sb.rotateFile(time.Now()); err != nil {
+		if err := sb.rotateFile(time.Now().UTC()); err != nil {
 			sb.logger.exit(err)
 		}
 	}
@@ -826,13 +830,13 @@ func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 }
 
 // rotateFile closes the syncBuffer's file and starts a new one.
-func (sb *syncBuffer) rotateFile(now time.Time) error {
+func (sb *syncBuffer) rotateFile(nowUTC time.Time) error {
 	if sb.file != nil {
 		sb.Flush()
 		sb.file.Close()
 	}
 	var err error
-	sb.file, _, err = create(severityName[sb.sev], now)
+	sb.file, _, err = create(severityName[sb.sev], nowUTC)
 	sb.nbytes = 0
 	if err != nil {
 		return err
@@ -842,10 +846,10 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 
 	// Write header.
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
+	fmt.Fprintf(&buf, "Log file created at: %s\n", nowUTC.Format("2006/01/02 15:04:05Z"))
 	fmt.Fprintf(&buf, "Running on machine: %s\n", host)
 	fmt.Fprintf(&buf, "Binary: Built with %s %s for %s/%s\n", runtime.Compiler, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
+	fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuuZ threadid file:line] msg\n")
 	n, err := sb.file.Write(buf.Bytes())
 	sb.nbytes += uint64(n)
 	return err
@@ -859,7 +863,7 @@ const bufferSize = 256 * 1024
 // createFiles creates all the log files for severity from sev down to infoLog.
 // l.mu is held.
 func (l *loggingT) createFiles(sev severity) error {
-	now := time.Now()
+	nowUTC := time.Now().UTC()
 	// Files are created in decreasing severity order, so as soon as we find one
 	// has already been created, we can stop.
 	for s := sev; s >= infoLog && l.file[s] == nil; s-- {
@@ -867,7 +871,7 @@ func (l *loggingT) createFiles(sev severity) error {
 			logger: l,
 			sev:    s,
 		}
-		if err := sb.rotateFile(now); err != nil {
+		if err := sb.rotateFile(nowUTC); err != nil {
 			return err
 		}
 		l.file[s] = sb
